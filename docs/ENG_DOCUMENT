@@ -1,262 +1,301 @@
-这份 PRD 非常温馨且目标明确。基于你提供的 **OurVocab (专属单词库)** 需求文档，我为你撰写了对应的**工程设计文档 (Technical Design Document)**。
-
-这份文档旨在将感性的产品需求转化为理性的技术实现方案。
+这份完整的工程设计文档（Technical Design Document）综合了你的浪漫创意与 Vercel Serverless 架构的最佳实践，旨在指导你高效、标准地完成 **OurVocab** 的开发。
 
 ---
 
-# OurVocab 工程设计文档 (TDD)
+# OurVocab 工程设计文档 (Vercel 部署版)
 
-## 1. 系统架构设计 (System Architecture)
+## 1. 文档概述
 
-由于是单人/极少数人使用的定制化 Web App，架构核心在于**开发速度**、**低成本维护**以及 **PWA 的原生体验**。
-
-* **技术栈选择**：
-* **前端**：Next.js + Tailwind CSS (支持 SSR 提升加载速度，内置 API 路由)。
-* **数据库**：MongoDB (非关系型数据库，方便存储字段不固定的单词信息和搭配)。
-* **部署**：Vercel (免费额度充足，自带 HTTPS 和全局加速)。
-* **离线支持**：使用 `next-pwa` 插件实现 PWA，支持离线查看已加载单词。
-
-
+* **项目名称**：OurVocab
+* **定位**：私人定制化单词汲取与复习 Web App。
+* **技术栈**：Next.js (App Router), Tailwind CSS, MongoDB Atlas, Framer Motion, Vercel。
 
 ---
 
-## 2. 数据模型设计 (Data Modeling)
+## 2. 系统架构 (System Architecture)
 
-### 2.1 单词表 (Words)
+针对 Vercel 的 Serverless 环境进行优化，采用“边缘计算+无状态后端”的设计。
 
-存储所有基础词库（COCA 5000）及管理员手动添加的词汇。
+* **前端层**：Next.js 响应式页面，支持 PWA（离线访问、桌面快捷方式）。
+* **逻辑层**：Vercel Serverless Functions。处理艾宾浩斯算法计算、词库检索。
+* **持久层**：MongoDB Atlas (Cloud)，通过连接池缓存机制（Singleton Pattern）防止 Serverless 函数频繁握手带来的延迟。
 
+---
+
+## 3. 数据模型 (Data Model)
+
+### 3.1 词库表 (`Word`)
+
+存储所有静态单词信息。
+
+* `word`: String (Index)
+* `phonetic`: String
+* `meanings`: Array[String]
+* `collocations`: Array[String]
+* `sentences`: Array[{en: String, cn: String}]
+* `is_custom`: Boolean (标记是否为你手动添加的“惊喜词汇”)
+
+### 3.2 进度表 (`UserProgress`)
+
+核心业务表，记录复习曲线。
+
+* `user_id`: String (默认 'default_user')
+* `word_id`: ObjectId (Ref Word)
+* `stage`: Number (0-8 级阶段)
+* `next_review_time`: Date (Index，核心查询条件)
+* `wrong_count`: Number (默认 0)
+* `status`: String ('learning' | 'mastered'，默认 'learning')
+* `last_reviewed_at`: Date
+
+**索引：** `{ user_id: 1, word_id: 1 }` 联合唯一索引
+
+### 3.3 配置表 (`Config`)
+
+存储应用配置，如首页寄语。
+
+* `key`: String (唯一键，如 'quotes')
+* `value`: Mixed (JSON 数据，如寄语数组)
+* `updated_at`: Date
+
+---
+
+## 4. 核心逻辑实现 (Core Logic)
+
+### 4.1 艾宾浩斯复习引擎 (The Algorithm)
+
+系统根据用户在复习时的反馈更新 `UserProgress`。
+
+| 用户反馈 | 阶段变更 (`stage`) | 下次复习间隔 |
+| --- | --- | --- |
+| **忘记 (Red)** | 重置为 `1` | 5 分钟后 |
+| **模糊 (Yellow)** | 保持不变 | 当前阶段间隔的 0.5 倍 |
+| **记得 (Green)** | `+1` | `INTERVALS[stage]` |
+
+**间隔常量定义：**
 ```typescript
-{
-  _id: ObjectId,
-  word: String,           // 单词，加索引
-  phonetic: String,      // 音标
-  meanings: [String],     // 释义
-  collocations: [String], // 固定搭配
-  sentences: [String],    // 生活造句
-  is_custom: Boolean,    // 是否为手动指定的惊喜词汇
-  audio_url: String      // 发音文件路径 (或使用 Web Speech API)
-}
-
+const INTERVALS = [
+  5 * 60 * 1000,        // Stage 0→1: 5 分钟
+  30 * 60 * 1000,       // Stage 1→2: 30 分钟
+  12 * 60 * 60 * 1000,  // Stage 2→3: 12 小时
+  24 * 60 * 60 * 1000,  // Stage 3→4: 1 天
+  2 * 24 * 60 * 60 * 1000,  // Stage 4→5: 2 天
+  4 * 24 * 60 * 60 * 1000,  // Stage 5→6: 4 天
+  7 * 24 * 60 * 60 * 1000,  // Stage 6→7: 7 天
+  15 * 24 * 60 * 60 * 1000, // Stage 7→8: 15 天
+];
 ```
 
-### 2.2 用户进度表 (UserProgress)
+### 4.2 每日新词抽取逻辑 (Daily Picker)
 
-记录复习状态，这是算法的核心。
+每天凌晨（或用户首次登录时）执行：
 
-```typescript
-{
-  user_id: String,
-  word_id: ObjectId,
-  stage: Number,          // 当前处于艾宾浩斯第几个阶段 (0-8)
-  next_review_time: Date, // 下次复习的时间戳，加索引
-  status: "learning" | "mastered", // 状态
-  wrong_count: Number     // 错误次数，用于错词榜
-}
+1. **查询到期词汇**：`next_review_time <= now`。
+2. **补足新词**：若到期词汇不足设定值（如 10 个），从 `Word` 表中抽取：
+* 优先抽取 `is_custom: true` 且未学习的词。
+* 次之随机抽取高频词库。
 
-```
 
-### 2.3 配置表 (Configs)
-
-```typescript
-{
-  key: "daily_quote",     // 每日寄语
-  value: String,
-  updated_at: Date
-}
-
-```
+3. **强制推送**：管理员在后台设置的“惊喜词汇”将无视权重，直接进入今日待学列表。
 
 ---
 
-## 3. 核心逻辑实现 (Core Logic)
+## 5. API 接口规范 (Vercel Routes)
 
-### 3.1 艾宾浩斯复习引擎
-
-根据用户点击的三个按钮（🔴🟡🟢），计算 `next_review_time`。
-
-* **配置数组**：`INTERVALS = [0, 5m, 30m, 12h, 1d, 2d, 4d, 7d, 15d]`
-* **逻辑流程**：
-1. **记得 (Green)**：`stage += 1`，根据 `INTERVALS[stage]` 更新 `next_review_time`。
-2. **模糊 (Yellow)**：`stage` 不变，`next_review_time` 设置为当前时间 + 当前阶段间隔的一半。
-3. **忘记 (Red)**：`stage = 1`（重头开始），并增加 `wrong_count`。
-
-
-
-### 3.2 每日新词抽取 (Daily Picker)
-
-* **触发时机**：用户每日首次登录。
-* **逻辑**：
-1. 查询 `UserProgress` 中属于今天的“待复习”词汇。
-2. 如果今日新词数 < 10：
-* 优先从 `Words` 表中查询 `is_custom: true` 且未在 `UserProgress` 中的词。
-* 不足部分从 COCA 5000 库中随机抽取。
-
-
-3. 将新抽取的词存入 `UserProgress`，初始 `stage = 0`。
-
-
-
----
-
-## 4. 接口设计 (API Design)
-
-| 功能 | 方法 | 路径 | 备注 |
+| 路径 | 方法 | 功能 | 逻辑说明 |
 | --- | --- | --- | --- |
-| 获取今日任务 | GET | `/api/tasks` | 返回新词列表和到期复习列表 |
-| 提交反馈 | POST | `/api/review` | 参数：`wordId`, `feedback(red/yellow/green)` |
-| 获取统计数据 | GET | `/api/stats` | 返回热力图数据、正确率等 |
-| 管理员增删词 | POST | `/api/admin/words` | 需校验 Admin Token |
-| 更新寄语 | PUT | `/api/admin/quote` | 修改首页文案 |
+| `/api/words/today` | GET | 获取今日任务 | 返回今日新词列表（优先 is_custom，然后普通词） |
+| `/api/words/review` | POST | 提交复习结果 | 更新 `UserProgress`，支持新词学习和复习反馈 |
+| `/api/words/review-list` | GET | 获取复习词列表 | 返回学习中的词汇，支持 exclude 参数避免重复 |
+| `/api/admin/quote` | GET/POST | 寄语管理 | 获取/更新首页随机显示的浪漫寄语 |
+| `/api/admin/words` | CRUD | 词库管理 | 单词的增删改查操作 |
+| `/api/stats/heatmap` | GET | 获取学习统计 | 返回过去一年的学习热力分布数据 |
 
----
+### 5.1 复习列表 API 详细设计 (`/api/words/review-list`)
 
-## 5. UI/UX 实现细节
+**请求参数：**
+* `limit`: 返回数量（默认 20）
+* `exclude`: 要排除的 word_id（避免刚复习的词立即再现）
 
-### 5.1 PWA 离线体验
+**返回逻辑：**
+1. 查询所有 `status: 'learning'` 的 UserProgress 记录
+2. 按优先级排序：
+   * 到期词汇优先（`next_review_time <= now`）
+   * 错误次数高的优先（`wrong_count` 降序）
+   * 阶段低的优先（`stage` 升序）
+   * 加入随机因子保证多样性
+3. 若排除后结果为空，则返回包含被排除词的完整列表（保证至少有词可复习）
 
-* 使用 **Service Worker** 缓存字体、图标和核心 CSS/JS。
-* **发音实现**：优先调用浏览器原生的 `window.speechSynthesis` (Web Speech API)，无需下载音频文件，节省流量且响应极快。
+### 5.2 复习提交 API 详细设计 (`/api/words/review`)
 
-### 5.2 复习卡片动画
-
-* 使用 `framer-motion` 实现“翻转卡片”动画。
-* **正面**：`rotateY: 0`；**背面**：`rotateY: 180`。
-
-### 5.3 统计热力图
-
-* 前端使用 `react-calendar-heatmap` 库，根据 `UserProgress` 的 `updated_at` 字段渲染类似 GitHub 的绿色方块。
-
----
-
-## 6. 安全与私密性
-
-* **隐藏入口**：`/admin-secret` 路径不记录在常规导航栏。
-* **简单认证**：由于是专属应用，可使用环境变量设置一个简单的 `ADMIN_PASSWORD`，进入后台时进行校验，存入浏览器的 `Cookie` 中。
-
----
-
-## 7. 后续扩展想法 (Future Roadmap)
-
-1. **微信推送**：如果复习词汇堆积过多，通过 Server酱 或企业微信机器人推送“该回来复习啦”的温馨提醒。
-2. **合照背景**：首页背景可以上传你们的合照，并根据天气自动切换滤镜。
-
----
-
-好的，基于前面的工程设计文档，我为你整理了 **MongoDB (使用 Mongoose ODM)** 的 Schema 定义。
-
-在 Next.js 或 Node.js 环境中，你可以直接使用这些定义。
-
-### 1. 单词基础库 Schema (`Word`)
-
-存储所有的单词元数据。
-
-```javascript
-import mongoose from 'mongoose';
-
-const WordSchema = new mongoose.Schema({
-  word: { 
-    type: String, 
-    required: true, 
-    unique: true, 
-    index: true // 建立索引，方便快速查询
-  },
-  phonetic: String, // 音标
-  meanings: [{ type: String }], // 释义，数组形式
-  collocations: [{ type: String }], // 固定搭配
-  sentences: [{ // 例句
-    en: String,
-    cn: String
-  }],
-  is_custom: { 
-    type: Boolean, 
-    default: false // 是否为管理员手动指定的“惊喜词汇”
-  },
-  audio_url: String, // 预留的发音文件地址
-  created_at: { type: Date, default: Date.now }
-});
-
-export const Word = mongoose.models.Word || mongoose.model('Word', WordSchema);
-
+**请求体：**
+```json
+{
+  "wordId": "xxx",        // 新词学习时使用
+  "progressId": "xxx",    // 复习时使用
+  "feedback": "green|yellow|red",
+  "isNewWord": true|false
+}
 ```
 
-### 2. 用户进度 Schema (`UserProgress`)
+**处理逻辑：**
+* 新词学习（`isNewWord: true`）：使用 `findOneAndUpdate` + `upsert` 创建 UserProgress
+* 复习反馈：更新现有 UserProgress 的 stage、next_review_time、wrong_count
+* 当 stage >= 8 且 feedback 为 green 时，标记为 `mastered`
 
-这是核心表，记录用户对每个单词的学习状态和复习周期。
+---
 
-```javascript
-import mongoose from 'mongoose';
+## 6. UI/UX 细节实现
 
-const UserProgressSchema = new mongoose.Schema({
-  user_id: { type: String, required: true }, // 虽然只有一个人，但保留 user_id 方便扩展
-  word_id: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'Word', 
-    required: true 
-  },
-  stage: { 
-    type: Number, 
-    default: 0, // 对应艾宾浩斯阶段 (0-8)
-    min: 0,
-    max: 8
-  },
-  next_review_time: { 
-    type: Date, 
-    default: Date.now,
-    index: true // 非常重要：首页获取“今日待复习”时会频繁根据此字段过滤
-  },
-  status: { 
-    type: String, 
-    enum: ['learning', 'mastered'], 
-    default: 'learning' 
-  },
-  wrong_count: { 
-    type: Number, 
-    default: 0 
-  },
-  last_reviewed_at: { 
-    type: Date 
+### 6.1 PWA 增强体验
+
+为了让它像原生 App，需在 `public/` 目录下配置：
+
+* **`manifest.json`**：定义图标、启动页配色（薄荷绿）和 `display: standalone`。
+* **`next-pwa`**：在 `next.config.js` 中配置，确保单词释义在弱网下也能通过 Service Worker 缓存读取。
+
+### 6.2 交互动效 (Framer Motion)
+
+* **翻转卡片**：复习时点击卡片，使用 `animate={{ rotateY: 180 }}` 实现丝滑翻转。
+* **进度反馈**：点击"记得"后，卡片向右上方飞出并变淡消失。
+
+### 6.3 复习页面无限循环实现
+
+**核心逻辑：**
+```typescript
+// 使用 useRef 避免闭包陷阱
+const reviewsRef = useRef<ReviewItem[]>([]);
+reviewsRef.current = reviews;
+
+const handleFeedback = async (feedback) => {
+  const currentWordId = reviewsRef.current[currentIndex].word._id;
+
+  // 1. 提交反馈到后端
+  await fetch('/api/words/review', { ... });
+
+  // 2. 增加已复习计数
+  setCompleted(prev => prev + 1);
+
+  // 3. 获取新一批词汇（排除当前词）
+  const freshReviews = await fetchReviews(currentWordId);
+
+  // 4. 设置新词列表并重置索引
+  if (freshReviews.length > 0) {
+    setReviews(freshReviews);
+    setCurrentIndex(0);
+  } else {
+    // 如果没有其他词，获取包含当前词的列表
+    const allReviews = await fetchReviews();
+    setReviews(allReviews);
+    setCurrentIndex(0);
   }
-});
-
-// 联合索引：确保同一个用户对同一个单词只有一条进度记录
-UserProgressSchema.index({ user_id: 1, word_id: 1 }, { unique: true });
-
-export const UserProgress = mongoose.models.UserProgress || mongoose.model('UserProgress', UserProgressSchema);
-
+};
 ```
 
-### 3. 配置与寄语 Schema (`Config`)
+**关键设计：**
+* 每次反馈后都重新获取词汇列表，保证优先级正确
+* 使用 `exclude` 参数避免刚复习的词立即再现
+* 永远不显示"已完成"状态，持续循环直到用户主动停止
 
-存储首页的励志语、全局开关等。
+### 6.4 发音功能 (Web Speech API)
 
-```javascript
-import mongoose from 'mongoose';
-
-const ConfigSchema = new mongoose.Schema({
-  key: { 
-    type: String, 
-    required: true, 
-    unique: true // 如 "daily_quote"
-  },
-  value: mongoose.Schema.Types.Mixed, // 可以存储字符串或复杂的 JSON 对象
-  updated_at: { type: Date, default: Date.now }
-});
-
-export const Config = mongoose.models.Config || mongoose.model('Config', ConfigSchema);
-
+```typescript
+const speak = (text: string) => {
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'en-US';
+  utterance.rate = 0.9;
+  window.speechSynthesis.speak(utterance);
+};
 ```
 
 ---
 
-### 设计要点说明：
+## 7. 部署与安全设计 (Vercel Specifics)
 
-1. **关联查询 (`ref`)**：`UserProgress` 通过 `word_id` 关联 `Word` 表。在获取复习列表时，你可以使用 `.populate('word_id')` 一次性查出单词的具体内容。
-2. **索引优化**：
-* `word` 字段加了索引，方便你在后台搜索单词。
-* `next_review_time` 加了索引，因为这是前端“复习卡片”查询最频繁的过滤条件（`where next_review_time <= now`）。
+### 7.1 环境隔离
 
+在 Vercel 控制台设置三套环境变量：
 
-3. **灵活性**：`Config` 表使用了 `Mixed` 类型，未来如果你想增加“背景图片 URL”或者“每日学习目标个数”，可以直接写进这个表，不需要改表结构。
+* `MONGODB_URI`：数据库连接串。
+* `ADMIN_PASSWORD`：管理员进入 `/admin-secret` 的唯一凭证。
+* `NEXT_PUBLIC_GA_ID`：可选，用于统计她最常在什么时间段学习。
 
-**你可以直接把这些代码放入 Next.js 项目的 `/models` 目录下。需要我帮你写一段具体的“提交复习结果（更新逻辑）”的 API 处理代码吗？**
+### 7.2 安全兜底
+
+* **Middleware 鉴权**：在 `middleware.ts` 中拦截 `/api/admin/*` 路由，校验 Header 中的自定义 Token，防止外部恶意修改词库。
+* **连接池管理**：使用全局单例连接 MongoDB，防止 Vercel Serverless 函数因并发产生过多的数据库连接。
+
+---
+
+## 8. 项目结构 (Project Structure)
+
+```
+ourvocab/
+├── public/
+│   ├── manifest.json       # PWA 配置
+│   └── icons/              # 应用图标
+├── src/
+│   ├── app/                # Next.js App Router 页面
+│   │   ├── page.tsx        # 首页
+│   │   ├── learn/page.tsx  # 学习页
+│   │   ├── review/page.tsx # 复习页
+│   │   ├── stats/page.tsx  # 统计页
+│   │   ├── admin/          # 管理后台
+│   │   └── api/            # API 路由
+│   │       ├── words/
+│   │       │   ├── today/route.ts
+│   │       │   ├── review/route.ts
+│   │       │   └── review-list/route.ts
+│   │       ├── admin/
+│   │       │   ├── quote/route.ts
+│   │       │   └── words/route.ts
+│   │       └── stats/
+│   │           └── heatmap/route.ts
+│   ├── components/         # 可复用组件
+│   │   ├── FlipCard.tsx    # 翻转卡片
+│   │   ├── WordCard.tsx    # 学习卡片
+│   │   ├── TaskCard.tsx    # 首页任务卡片
+│   │   └── BottomNav.tsx   # 底部导航
+│   ├── lib/
+│   │   ├── mongodb.ts      # 数据库连接（单例模式）
+│   │   └── ebbinghaus.ts   # 艾宾浩斯算法
+│   └── models/             # Mongoose 数据模型
+│       ├── Word.ts
+│       ├── UserProgress.ts
+│       ├── Config.ts
+│       └── index.ts
+├── scripts/
+│   └── seed.ts             # 数据库初始化脚本
+├── .env.local              # 环境变量
+├── next.config.js          # Next.js + PWA 配置
+└── tailwind.config.ts      # Tailwind CSS 配置
+```
+
+---
+
+## 9. 运维与后续扩展
+
+* **自动化通知**：可利用 Vercel 的 **Cron Jobs** 功能，每天早上 8 点触发一次逻辑，检查今日任务，并通过集成推送（如 PushDeer 或邮件）发送提醒。
+* **数据备份**：利用 MongoDB Atlas 的自动快照功能，确保珍贵的研究记录不丢失。
+* **数据初始化**：运行 `npm run seed` 导入初始词库数据
+
+---
+
+## 10. 快速开始
+
+```bash
+# 1. 安装依赖
+npm install
+
+# 2. 配置环境变量
+cp .env.example .env.local
+# 编辑 .env.local，填入 MongoDB URI
+
+# 3. 初始化数据库
+npm run seed
+
+# 4. 启动开发服务器
+npm run dev
+
+# 5. 构建生产版本
+npm run build
+```
