@@ -1,0 +1,262 @@
+这份 PRD 非常温馨且目标明确。基于你提供的 **OurVocab (专属单词库)** 需求文档，我为你撰写了对应的**工程设计文档 (Technical Design Document)**。
+
+这份文档旨在将感性的产品需求转化为理性的技术实现方案。
+
+---
+
+# OurVocab 工程设计文档 (TDD)
+
+## 1. 系统架构设计 (System Architecture)
+
+由于是单人/极少数人使用的定制化 Web App，架构核心在于**开发速度**、**低成本维护**以及 **PWA 的原生体验**。
+
+* **技术栈选择**：
+* **前端**：Next.js + Tailwind CSS (支持 SSR 提升加载速度，内置 API 路由)。
+* **数据库**：MongoDB (非关系型数据库，方便存储字段不固定的单词信息和搭配)。
+* **部署**：Vercel (免费额度充足，自带 HTTPS 和全局加速)。
+* **离线支持**：使用 `next-pwa` 插件实现 PWA，支持离线查看已加载单词。
+
+
+
+---
+
+## 2. 数据模型设计 (Data Modeling)
+
+### 2.1 单词表 (Words)
+
+存储所有基础词库（COCA 5000）及管理员手动添加的词汇。
+
+```typescript
+{
+  _id: ObjectId,
+  word: String,           // 单词，加索引
+  phonetic: String,      // 音标
+  meanings: [String],     // 释义
+  collocations: [String], // 固定搭配
+  sentences: [String],    // 生活造句
+  is_custom: Boolean,    // 是否为手动指定的惊喜词汇
+  audio_url: String      // 发音文件路径 (或使用 Web Speech API)
+}
+
+```
+
+### 2.2 用户进度表 (UserProgress)
+
+记录复习状态，这是算法的核心。
+
+```typescript
+{
+  user_id: String,
+  word_id: ObjectId,
+  stage: Number,          // 当前处于艾宾浩斯第几个阶段 (0-8)
+  next_review_time: Date, // 下次复习的时间戳，加索引
+  status: "learning" | "mastered", // 状态
+  wrong_count: Number     // 错误次数，用于错词榜
+}
+
+```
+
+### 2.3 配置表 (Configs)
+
+```typescript
+{
+  key: "daily_quote",     // 每日寄语
+  value: String,
+  updated_at: Date
+}
+
+```
+
+---
+
+## 3. 核心逻辑实现 (Core Logic)
+
+### 3.1 艾宾浩斯复习引擎
+
+根据用户点击的三个按钮（🔴🟡🟢），计算 `next_review_time`。
+
+* **配置数组**：`INTERVALS = [0, 5m, 30m, 12h, 1d, 2d, 4d, 7d, 15d]`
+* **逻辑流程**：
+1. **记得 (Green)**：`stage += 1`，根据 `INTERVALS[stage]` 更新 `next_review_time`。
+2. **模糊 (Yellow)**：`stage` 不变，`next_review_time` 设置为当前时间 + 当前阶段间隔的一半。
+3. **忘记 (Red)**：`stage = 1`（重头开始），并增加 `wrong_count`。
+
+
+
+### 3.2 每日新词抽取 (Daily Picker)
+
+* **触发时机**：用户每日首次登录。
+* **逻辑**：
+1. 查询 `UserProgress` 中属于今天的“待复习”词汇。
+2. 如果今日新词数 < 10：
+* 优先从 `Words` 表中查询 `is_custom: true` 且未在 `UserProgress` 中的词。
+* 不足部分从 COCA 5000 库中随机抽取。
+
+
+3. 将新抽取的词存入 `UserProgress`，初始 `stage = 0`。
+
+
+
+---
+
+## 4. 接口设计 (API Design)
+
+| 功能 | 方法 | 路径 | 备注 |
+| --- | --- | --- | --- |
+| 获取今日任务 | GET | `/api/tasks` | 返回新词列表和到期复习列表 |
+| 提交反馈 | POST | `/api/review` | 参数：`wordId`, `feedback(red/yellow/green)` |
+| 获取统计数据 | GET | `/api/stats` | 返回热力图数据、正确率等 |
+| 管理员增删词 | POST | `/api/admin/words` | 需校验 Admin Token |
+| 更新寄语 | PUT | `/api/admin/quote` | 修改首页文案 |
+
+---
+
+## 5. UI/UX 实现细节
+
+### 5.1 PWA 离线体验
+
+* 使用 **Service Worker** 缓存字体、图标和核心 CSS/JS。
+* **发音实现**：优先调用浏览器原生的 `window.speechSynthesis` (Web Speech API)，无需下载音频文件，节省流量且响应极快。
+
+### 5.2 复习卡片动画
+
+* 使用 `framer-motion` 实现“翻转卡片”动画。
+* **正面**：`rotateY: 0`；**背面**：`rotateY: 180`。
+
+### 5.3 统计热力图
+
+* 前端使用 `react-calendar-heatmap` 库，根据 `UserProgress` 的 `updated_at` 字段渲染类似 GitHub 的绿色方块。
+
+---
+
+## 6. 安全与私密性
+
+* **隐藏入口**：`/admin-secret` 路径不记录在常规导航栏。
+* **简单认证**：由于是专属应用，可使用环境变量设置一个简单的 `ADMIN_PASSWORD`，进入后台时进行校验，存入浏览器的 `Cookie` 中。
+
+---
+
+## 7. 后续扩展想法 (Future Roadmap)
+
+1. **微信推送**：如果复习词汇堆积过多，通过 Server酱 或企业微信机器人推送“该回来复习啦”的温馨提醒。
+2. **合照背景**：首页背景可以上传你们的合照，并根据天气自动切换滤镜。
+
+---
+
+好的，基于前面的工程设计文档，我为你整理了 **MongoDB (使用 Mongoose ODM)** 的 Schema 定义。
+
+在 Next.js 或 Node.js 环境中，你可以直接使用这些定义。
+
+### 1. 单词基础库 Schema (`Word`)
+
+存储所有的单词元数据。
+
+```javascript
+import mongoose from 'mongoose';
+
+const WordSchema = new mongoose.Schema({
+  word: { 
+    type: String, 
+    required: true, 
+    unique: true, 
+    index: true // 建立索引，方便快速查询
+  },
+  phonetic: String, // 音标
+  meanings: [{ type: String }], // 释义，数组形式
+  collocations: [{ type: String }], // 固定搭配
+  sentences: [{ // 例句
+    en: String,
+    cn: String
+  }],
+  is_custom: { 
+    type: Boolean, 
+    default: false // 是否为管理员手动指定的“惊喜词汇”
+  },
+  audio_url: String, // 预留的发音文件地址
+  created_at: { type: Date, default: Date.now }
+});
+
+export const Word = mongoose.models.Word || mongoose.model('Word', WordSchema);
+
+```
+
+### 2. 用户进度 Schema (`UserProgress`)
+
+这是核心表，记录用户对每个单词的学习状态和复习周期。
+
+```javascript
+import mongoose from 'mongoose';
+
+const UserProgressSchema = new mongoose.Schema({
+  user_id: { type: String, required: true }, // 虽然只有一个人，但保留 user_id 方便扩展
+  word_id: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Word', 
+    required: true 
+  },
+  stage: { 
+    type: Number, 
+    default: 0, // 对应艾宾浩斯阶段 (0-8)
+    min: 0,
+    max: 8
+  },
+  next_review_time: { 
+    type: Date, 
+    default: Date.now,
+    index: true // 非常重要：首页获取“今日待复习”时会频繁根据此字段过滤
+  },
+  status: { 
+    type: String, 
+    enum: ['learning', 'mastered'], 
+    default: 'learning' 
+  },
+  wrong_count: { 
+    type: Number, 
+    default: 0 
+  },
+  last_reviewed_at: { 
+    type: Date 
+  }
+});
+
+// 联合索引：确保同一个用户对同一个单词只有一条进度记录
+UserProgressSchema.index({ user_id: 1, word_id: 1 }, { unique: true });
+
+export const UserProgress = mongoose.models.UserProgress || mongoose.model('UserProgress', UserProgressSchema);
+
+```
+
+### 3. 配置与寄语 Schema (`Config`)
+
+存储首页的励志语、全局开关等。
+
+```javascript
+import mongoose from 'mongoose';
+
+const ConfigSchema = new mongoose.Schema({
+  key: { 
+    type: String, 
+    required: true, 
+    unique: true // 如 "daily_quote"
+  },
+  value: mongoose.Schema.Types.Mixed, // 可以存储字符串或复杂的 JSON 对象
+  updated_at: { type: Date, default: Date.now }
+});
+
+export const Config = mongoose.models.Config || mongoose.model('Config', ConfigSchema);
+
+```
+
+---
+
+### 设计要点说明：
+
+1. **关联查询 (`ref`)**：`UserProgress` 通过 `word_id` 关联 `Word` 表。在获取复习列表时，你可以使用 `.populate('word_id')` 一次性查出单词的具体内容。
+2. **索引优化**：
+* `word` 字段加了索引，方便你在后台搜索单词。
+* `next_review_time` 加了索引，因为这是前端“复习卡片”查询最频繁的过滤条件（`where next_review_time <= now`）。
+
+
+3. **灵活性**：`Config` 表使用了 `Mixed` 类型，未来如果你想增加“背景图片 URL”或者“每日学习目标个数”，可以直接写进这个表，不需要改表结构。
+
+**你可以直接把这些代码放入 Next.js 项目的 `/models` 目录下。需要我帮你写一段具体的“提交复习结果（更新逻辑）”的 API 处理代码吗？**
