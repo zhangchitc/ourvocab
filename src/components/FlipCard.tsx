@@ -42,38 +42,15 @@ export default function FlipCard({ word, onFeedback }: FlipCardProps) {
         className="perspective-1000"
       >
         <motion.div
-          className="relative w-full min-h-[300px] cursor-pointer"
+          className="relative w-full cursor-pointer"
           onClick={() => !isFlipped && setIsFlipped(true)}
           animate={{ rotateY: isFlipped ? 180 : 0 }}
           transition={{ duration: 0.6 }}
           style={{ transformStyle: 'preserve-3d' }}
         >
-          {/* Front - Word Only */}
+          {/* Back - Full Content (defines height) */}
           <div
-            className="absolute inset-0 bg-white rounded-3xl shadow-lg p-8 flex flex-col items-center justify-center"
-            style={{ backfaceVisibility: 'hidden' }}
-          >
-            <h2 className="text-4xl font-bold text-gray-800 mb-4">{word.word}</h2>
-            {word.phonetic && (
-              <p className="text-gray-500 mb-4">{word.phonetic}</p>
-            )}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                speak(word.word);
-              }}
-              className="p-3 rounded-full bg-mint-100 text-mint-600 hover:bg-mint-200 transition-colors"
-            >
-              <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-              </svg>
-            </button>
-            <p className="text-gray-400 mt-6 text-sm">点击卡片看看记得不 👆</p>
-          </div>
-
-          {/* Back - Full Content */}
-          <div
-            className="absolute inset-0 bg-white rounded-3xl shadow-lg p-6 overflow-y-auto"
+            className="bg-white rounded-3xl shadow-lg p-6 pb-8"
             style={{ backfaceVisibility: 'hidden', transform: 'rotateY(180deg)' }}
           >
             <div className="text-center mb-4">
@@ -118,6 +95,29 @@ export default function FlipCard({ word, onFeedback }: FlipCardProps) {
                 </ul>
               </div>
             )}
+          </div>
+
+          {/* Front - Word Only (overlays back) */}
+          <div
+            className="absolute inset-0 bg-white rounded-3xl shadow-lg p-8 flex flex-col items-center justify-center"
+            style={{ backfaceVisibility: 'hidden' }}
+          >
+            <h2 className="text-4xl font-bold text-gray-800 mb-4">{word.word}</h2>
+            {word.phonetic && (
+              <p className="text-gray-500 mb-4">{word.phonetic}</p>
+            )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                speak(word.word);
+              }}
+              className="p-3 rounded-full bg-mint-100 text-mint-600 hover:bg-mint-200 transition-colors"
+            >
+              <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+              </svg>
+            </button>
+            <p className="text-gray-400 mt-6 text-sm">点击卡片看看记得不 👆</p>
           </div>
         </motion.div>
       </motion.div>
