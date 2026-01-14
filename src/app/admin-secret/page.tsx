@@ -181,6 +181,14 @@ export default function AdminPage() {
                   <p className="text-sm text-gray-500 mt-1">
                     {word.meanings?.slice(0, 2).join('; ')}
                   </p>
+                  <div className="flex gap-3 mt-1 text-xs text-gray-400">
+                    {word.collocations?.length > 0 && (
+                      <span>搭配: {word.collocations.length}</span>
+                    )}
+                    {word.sentences?.length > 0 && (
+                      <span>例句: {word.sentences.length}</span>
+                    )}
+                  </div>
                 </div>
                 <button
                   onClick={() => handleDeleteWord(word._id)}
